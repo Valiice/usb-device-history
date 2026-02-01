@@ -1,101 +1,51 @@
 # USB Device History Scanner
 
-A comprehensive Rust application that scans and displays detailed history of all USB devices ever connected to your Windows PC.
+A fast Rust application that scans and displays detailed history of all USB devices ever connected to your Windows PC.
 
 ## Features
 
-### Core Functionality
-- **Concurrent Scanning**: Async/await architecture with parallel I/O operations for maximum performance
-- **Native Windows APIs**: Direct Windows Event Log API calls (no PowerShell or wevtutil spawning)
-- **Registry Scanning**: Queries both `USBSTOR` and `USB` registry paths for comprehensive device discovery
-- **Installation Timestamps**: Parses `setupapi.dev.log` and Windows Event Logs to find when devices were first installed
-- **Device Categorization**: Automatically categorizes devices into Storage, Input, Audio, Mobile, Hub, and Other
-- **Color-Coded Output**: Terminal-based color-coded display with category icons
-- **Smart Deduplication**: Removes duplicate entries (same device in multiple registry locations)
-- **Vendor Database**: Built-in database of 580+ USB manufacturers (VID lookup)
-
-### Data Sources (All queried concurrently)
-1. **Windows Registry** - `HKLM\SYSTEM\CurrentControlSet\Enum\{USBSTOR,USB}` (async parallel scanning)
-2. **setupapi.dev.log** - `C:\Windows\INF\setupapi.dev.log` for persistent installation timestamps
-3. **Windows Event Logs** - Native Event Log API (`EvtOpenLog`, `EvtQuery`, `EvtNext`) for System and DriverFrameworks logs
-4. **MountedDevices** - Drive letter mappings
-5. **WMI Queries** - Currently connected removable drives
-
-All data sources are queried in parallel using Tokio async runtime for optimal performance.
-
-### Device Information Displayed
-- VID:PID (Vendor ID : Product ID)
-- Manufacturer name
-- Device name and description
-- Serial number
-- Installation timestamp (when available)
-- Drive letter (for storage devices)
-- Device category with color-coded icons
-
-## Performance
-
-The application is optimized for speed using async/concurrent operations:
-- **Parallel Registry Scanning** - Multiple registry paths scanned concurrently
-- **Concurrent Data Gathering** - All data sources (registry, setupapi, event logs, WMI, mounted devices) queried in parallel
-- **Thread Pool for I/O** - Blocking operations offloaded to Tokio thread pool
-- **Native APIs** - Direct Windows Event Log API calls eliminate process spawning overhead
-
-All I/O-bound operations run concurrently, making the tool significantly faster than sequential implementations.
+- **Fast Concurrent Scanning** - Async I/O with parallel data gathering
+- **Native Windows APIs** - Direct Event Log API calls (no PowerShell spawning)
+- **Complete Device History** - Registry, setupapi.dev.log, Event Logs, WMI, and MountedDevices
+- **Installation Timestamps** - Tracks when devices were first connected
+- **Smart Categorization** - Auto-categorizes into Storage, Input, Audio, Mobile, Hub, Other
+- **Vendor Database** - Built-in database of 580+ USB manufacturers
+- **Color-Coded Output** - Easy-to-read terminal display with category icons
+- **Deduplication** - Removes duplicate entries across registry paths
 
 ## Requirements
 
 - **OS**: Windows (uses Windows-specific APIs)
 - **Rust**: 1.70.0 or later
-- **Permissions**: Administrator privileges recommended for:
-  - Full registry access
-  - Reading setupapi.dev.log
-  - Querying event logs
+- **Permissions**: Run as Administrator for full access to event logs and registry
 
-## Building
+## Installation
 
 ```bash
 cargo build --release
 ```
 
-## Running
+## Usage
 
 ```bash
+# Run the scanner
 .\target\release\usb-device-history.exe
-```
 
-Or with Cargo:
-
-```bash
+# Or with Cargo
 cargo run --release
+
+# Show all devices including system interfaces
+cargo run --release -- --verbose
 ```
 
 ### Command-Line Options
 
-- `--verbose` or `-v`: Show all devices including system/composite interfaces (ROOT_HUB, &MI_ interfaces, etc.)
-
-  By default, the program filters out system devices and composite interfaces to show only physical devices you've plugged in. Use verbose mode to see everything Windows has registered.
+- `--verbose` / `-v` - Show all devices including system/composite interfaces (ROOT_HUB, &MI_ interfaces, etc.)
 
 ## Example Output
 
 ```
 === USB Device History Scanner ===
-
-=== Scanning Registry ===
-Scanning USB Storage...
-  Found 2 devices
-Scanning USB Devices...
-  Found 80 devices
-
-=== Gathering Additional Information ===
-Parsing setupapi.dev.log for installation times...
-  Found 3 installation timestamps from setupapi.dev.log
-Querying Windows Event Logs for installation times...
-  Found 1 installation timestamps
-
-📅 Total installation timestamps found: 4
-   - From setupapi.dev.log: 3
-   - From event logs: 1
-   - Matched timestamps to 11 devices
 
 === Device History (Categorized) ===
 
@@ -107,11 +57,6 @@ Device #1
   Name: USB Mass Storage Device
   Serial: 0401f51759fee3a2a5379070fa6f14887b43cd053cccf99e35e4ba0ef498...
   Installed: 2026-01-31 23:41:31
-
-Device #2
-  💾 Storage
-  Name: OnePlus Device Driver USB Device
-  Serial: a&2e2cd3ff&0&4079c817&0
 
 ▸ 🎮 Input Device (5 devices)
 ────────────────────────────────────────────────────────────
@@ -125,51 +70,18 @@ Device #3
 
 ────────────────────────────────────────────────────────────
 Total user devices found: 24
-Total all devices (including system): 82
 ```
 
-## Device Categories
+## Performance
 
-- 💾 **Storage** - USB drives, external hard drives, card readers
-- 🎮 **Input Device** - Keyboards, mice, game controllers
-- 🎵 **Audio** - Headsets, microphones, sound devices
-- 📱 **Mobile Device** - Phones, tablets
-- 🔌 **USB Hub** - USB hubs and docking stations
-- 🔧 **Other** - Everything else
-
-## Architecture
-
-The project follows Separation of Concerns (SoC) with async modular architecture:
-
-- `main.rs` - Async orchestration and display logic (Tokio runtime)
-- `device.rs` - Device structure and categorization
-- `vendors.rs` - USB vendor database (580+ manufacturers, VID to name mapping)
-- `registry.rs` - Async Windows registry queries with parallel path scanning
-- `setupapi.rs` - Async setupapi.dev.log parser
-- `eventlog.rs` - Native Windows Event Log API queries (EvtOpenLog, EvtQuery, EvtNext, EvtRender)
-- `mounted.rs` - Async MountedDevices registry queries
-- `wmi_query.rs` - Async WMI queries for connected drives
-
-All modules use `tokio::spawn_blocking` for I/O operations and are orchestrated concurrently in `main.rs` using `tokio::join!`.
-
-## Dependencies
-
-- `tokio` - Async runtime with multi-threading support
-- `futures` - Async utilities for concurrent operations
-- `windows` - Native Windows API bindings (Event Log API)
-- `winreg` - Windows registry access
-- `wmi` - WMI queries
-- `serde` - Serialization/deserialization
-- `chrono` - Date/time handling
-- `colored` - Terminal color output
+All data sources (registry, setupapi.dev.log, Event Logs, WMI, MountedDevices) are queried concurrently using Tokio async runtime. Native Windows Event Log API eliminates process spawning overhead for faster, more reliable results.
 
 ## Notes
 
-- Some devices may not have installation timestamps if the logs have been rotated or cleared
-- The program filters out system devices (ROOT_HUB, composite interfaces, etc.)
-- Devices are deduplicated using prefix-matching on serial numbers (Windows stores serials differently in USBSTOR vs USB paths)
-- For best results, run as Administrator
+- Run as Administrator for complete event log and registry access
+- Some devices may not have timestamps if logs have been rotated
+- System devices are filtered by default (use `--verbose` to show all)
 
 ## License
 
-This project is open source.
+MIT License
