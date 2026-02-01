@@ -4,7 +4,13 @@ use std::io::{BufRead, BufReader};
 use chrono::{DateTime, NaiveDateTime, Utc};
 
 /// Parse setupapi.dev.log for USB device installation timestamps
-pub fn parse_setupapi_log() -> HashMap<String, DateTime<Utc>> {
+pub async fn parse_setupapi_log() -> HashMap<String, DateTime<Utc>> {
+    tokio::task::spawn_blocking(|| parse_setupapi_log_sync())
+        .await
+        .unwrap_or_default()
+}
+
+fn parse_setupapi_log_sync() -> HashMap<String, DateTime<Utc>> {
     let mut timestamps = HashMap::new();
 
     println!("Parsing setupapi.dev.log for installation times...");

@@ -99,6 +99,7 @@ pub fn get_vendor_database() -> HashMap<&'static str, &'static str> {
     vendors.insert("05A6", "Cisco Systems");
     vendors.insert("05A7", "Bose");
     vendors.insert("05AC", "Apple");
+    vendors.insert("054C", "Sony");
     vendors.insert("05BC", "3G Green Green Globe");
     vendors.insert("05C6", "Qualcomm");
     vendors.insert("05C8", "Cheng Uei Precision (Foxlink)");

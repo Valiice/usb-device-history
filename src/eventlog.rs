@@ -1,24 +1,24 @@
 use std::collections::HashMap;
-use std::process::Command;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, NaiveDateTime};
+use windows::Win32::System::EventLog::*;
+use windows::core::PWSTR;
 
-/// Query Windows Event Log for USB device installation timestamps
-pub fn get_install_timestamps() -> HashMap<String, DateTime<Utc>> {
+/// Query Windows Event Logs natively for USB device installation timestamps
+/// No PowerShell or wevtutil spawning - uses Windows API directly
+pub async fn get_install_timestamps() -> HashMap<String, DateTime<Utc>> {
     let mut timestamps = HashMap::new();
 
     println!("Querying Windows Event Logs for installation times...");
 
-    // Try multiple methods to get USB event data
-
-    // Method 1: DriverFrameworks log (requires admin)
-    if let Some(ts) = try_driver_frameworks_log() {
-        timestamps.extend(ts);
+    // Try to get timestamps from DriverFrameworks log (more reliable)
+    if let Ok(driver_times) = query_driver_frameworks_log().await {
+        timestamps.extend(driver_times);
     }
 
-    // Method 2: System log via PowerShell (more accessible)
-    if timestamps.is_empty() {
-        if let Some(ts) = try_system_log_powershell() {
-            timestamps.extend(ts);
+    // Also try System log as fallback
+    if let Ok(system_times) = query_system_log().await {
+        for (key, time) in system_times {
+            timestamps.entry(key).or_insert(time);
         }
     }
 
@@ -32,122 +32,238 @@ pub fn get_install_timestamps() -> HashMap<String, DateTime<Utc>> {
     timestamps
 }
 
-fn try_driver_frameworks_log() -> Option<HashMap<String, DateTime<Utc>>> {
-    let output = Command::new("wevtutil")
-        .args([
-            "qe",
-            "Microsoft-Windows-DriverFrameworks-UserMode/Operational",
-            "/f:text",
-            "/c:100",
-            "/rd:true"
-        ])
-        .output()
-        .ok()?;
+/// Query the DriverFrameworks-UserMode operational log
+async fn query_driver_frameworks_log() -> Result<HashMap<String, DateTime<Utc>>, String> {
+    tokio::task::spawn_blocking(|| {
+        query_driver_frameworks_log_sync()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
-    if !output.status.success() || output.stdout.is_empty() {
-        return None;
-    }
-
+fn query_driver_frameworks_log_sync() -> Result<HashMap<String, DateTime<Utc>>, String> {
     let mut timestamps = HashMap::new();
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut current_time: Option<DateTime<Utc>> = None;
 
-    for line in text.lines() {
-        let line = line.trim();
+    let channel = "Microsoft-Windows-DriverFrameworks-UserMode/Operational";
 
-        // Try multiple date formats
-        if line.starts_with("Date:") || line.contains("TimeCreated") {
-            if let Some(date_str) = extract_date(line) {
-                if let Ok(dt) = DateTime::parse_from_rfc3339(&date_str) {
-                    current_time = Some(dt.with_timezone(&Utc));
+    // Open event log channel
+    let channel_wide: Vec<u16> = channel.encode_utf16().chain(std::iter::once(0)).collect();
+    let h_log = unsafe {
+        EvtOpenLog(
+            None,
+            PWSTR(channel_wide.as_ptr() as *mut u16),
+            0x1, // EvtOpenChannelPath
+        )
+    }
+    .map_err(|e| format!("Failed to open DriverFrameworks log: {}", e))?;
+
+    // Query for recent events
+    let query = "*[System/EventID=2003]"; // Device installation events
+    let query_wide: Vec<u16> = query.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let h_results = unsafe {
+        EvtQuery(
+            None,
+            PWSTR(channel_wide.as_ptr() as *mut u16),
+            PWSTR(query_wide.as_ptr() as *mut u16),
+            0x200, // EvtQueryReverseDirection (newest first)
+        )
+    }
+    .map_err(|e| {
+        unsafe { let _ = EvtClose(h_log); }
+        format!("Failed to query events: {}", e)
+    })?;
+
+    // Read events
+    let mut event_handles: Vec<isize> = vec![0; 100];
+    let mut returned = 0u32;
+
+    unsafe {
+        if EvtNext(
+            h_results,
+            event_handles.as_mut_slice(),
+            3000, // 3 second timeout
+            0,
+            &mut returned,
+        ).is_ok() {
+            for i in 0..returned as usize {
+                let h_event = EVT_HANDLE(event_handles[i]);
+                if let Some((vid_pid, time)) = parse_event(&h_event) {
+                    timestamps.insert(vid_pid, time);
                 }
+                let _ = EvtClose(h_event);
             }
         }
 
-        if (line.contains("USB") || line.contains("USBSTOR")) && current_time.is_some() {
-            if let Some(device_id) = extract_device_id(line) {
-                timestamps.insert(device_id, current_time.unwrap());
-                current_time = None;
-            }
-        }
+        let _ = EvtClose(h_results);
+        let _ = EvtClose(h_log);
     }
 
-    if timestamps.is_empty() {
-        None
-    } else {
-        Some(timestamps)
+    Ok(timestamps)
+}
+
+/// Query the System log for USB events
+async fn query_system_log() -> Result<HashMap<String, DateTime<Utc>>, String> {
+    tokio::task::spawn_blocking(|| {
+        query_system_log_sync()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn query_system_log_sync() -> Result<HashMap<String, DateTime<Utc>>, String> {
+    let mut timestamps = HashMap::new();
+
+    let channel = "System";
+
+    // Open event log channel
+    let channel_wide: Vec<u16> = channel.encode_utf16().chain(std::iter::once(0)).collect();
+    let h_log = unsafe {
+        EvtOpenLog(
+            None,
+            PWSTR(channel_wide.as_ptr() as *mut u16),
+            0x1,
+        )
+    }
+    .map_err(|e| format!("Failed to open System log: {}", e))?;
+
+    // Query for USB-related events
+    let query = "*[System/Provider[@Name='Microsoft-Windows-Kernel-PnP'] and System/EventID=400]";
+    let query_wide: Vec<u16> = query.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let h_results = unsafe {
+        EvtQuery(
+            None,
+            PWSTR(channel_wide.as_ptr() as *mut u16),
+            PWSTR(query_wide.as_ptr() as *mut u16),
+            0x200,
+        )
+    }
+    .map_err(|e| {
+        unsafe { let _ = EvtClose(h_log); }
+        format!("Failed to query System events: {}", e)
+    })?;
+
+    // Read events
+    let mut event_handles: Vec<isize> = vec![0; 200];
+    let mut returned = 0u32;
+
+    unsafe {
+        if EvtNext(
+            h_results,
+            event_handles.as_mut_slice(),
+            3000,
+            0,
+            &mut returned,
+        ).is_ok() {
+            for i in 0..returned as usize {
+                let h_event = EVT_HANDLE(event_handles[i]);
+                if let Some((vid_pid, time)) = parse_event(&h_event) {
+                    timestamps.entry(vid_pid).or_insert(time);
+                }
+                let _ = EvtClose(h_event);
+            }
+        }
+
+        let _ = EvtClose(h_results);
+        let _ = EvtClose(h_log);
+    }
+
+    Ok(timestamps)
+}
+
+/// Parse an event to extract VID/PID and timestamp
+fn parse_event(h_event: &EVT_HANDLE) -> Option<(String, DateTime<Utc>)> {
+    unsafe {
+        // Get event as XML
+        let mut buffer = vec![0u8; 8192];
+        let mut used = 0u32;
+        let mut property_count = 0u32;
+
+        if EvtRender(
+            None,
+            *h_event,
+            1, // EvtRenderEventXml
+            buffer.len() as u32,
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut used,
+            &mut property_count,
+        ).is_err() {
+            return None;
+        }
+
+        // Convert to string (UTF-16)
+        let xml_slice = std::slice::from_raw_parts(
+            buffer.as_ptr() as *const u16,
+            (used as usize) / 2,
+        );
+        let xml = String::from_utf16_lossy(xml_slice);
+
+        // Extract VID/PID from XML
+        let vid_pid = extract_vid_pid_from_xml(&xml)?;
+
+        // Extract timestamp
+        let timestamp = extract_timestamp_from_xml(&xml)?;
+
+        Some((vid_pid, timestamp))
     }
 }
 
-fn try_system_log_powershell() -> Option<HashMap<String, DateTime<Utc>>> {
-    let script = r#"
-        Get-EventLog -LogName System -Newest 200 -ErrorAction SilentlyContinue |
-        Where-Object { $_.Message -match 'USB|USBSTOR' } |
-        Select-Object -First 10 |
-        ForEach-Object {
-            "$($_.TimeGenerated.ToString('o'))|$($_.Message.Split([Environment]::NewLine)[0])"
-        }
-    "#;
+/// Extract VID_XXXX&PID_XXXX from event XML
+fn extract_vid_pid_from_xml(xml: &str) -> Option<String> {
+    // Look for VID_ pattern
+    if let Some(start) = xml.find("VID_") {
+        let after_vid = &xml[start..];
 
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output()
-        .ok()?;
+        // Find PID_ after VID_
+        if let Some(pid_pos) = after_vid.find("PID_") {
+            if after_vid.len() >= 8 {
+                let vid = &after_vid[4..8]; // 4 chars after "VID_"
 
-    if !output.status.success() || output.stdout.is_empty() {
-        return None;
-    }
-
-    let mut timestamps = HashMap::new();
-    let text = String::from_utf8_lossy(&output.stdout);
-
-    for line in text.lines() {
-        if let Some((time_str, message)) = line.split_once('|') {
-            if let Ok(dt) = DateTime::parse_from_rfc3339(time_str.trim()) {
-                if let Some(device_id) = extract_device_id(message) {
-                    timestamps.insert(device_id, dt.with_timezone(&Utc));
+                if after_vid.len() >= pid_pos + 8 {
+                    let after_pid = &after_vid[pid_pos..];
+                    let pid = &after_pid[4..8]; // 4 chars after "PID_"
+                    return Some(format!("VID_{}&PID_{}", vid, pid));
                 }
             }
         }
     }
 
-    if timestamps.is_empty() {
-        None
-    } else {
-        Some(timestamps)
-    }
-}
-
-fn extract_date(line: &str) -> Option<String> {
-    // Try to extract date from various formats
-    if let Some(stripped) = line.strip_prefix("Date:") {
-        return Some(stripped.trim().to_string());
-    }
-
-    // Look for TimeCreated format
-    if line.contains("TimeCreated") {
-        // Parse XML-style: <TimeCreated SystemTime='2026-01-31T...'/>
-        if let Some(start) = line.find("SystemTime='") {
-            if let Some(end) = line[start + 12..].find('\'') {
-                return Some(line[start + 12..start + 12 + end].to_string());
-            }
-        }
+    // Also check for USBSTOR references
+    if xml.contains("USBSTOR") {
+        return Some("USBSTOR".to_string());
     }
 
     None
 }
 
-fn extract_device_id(line: &str) -> Option<String> {
-    // Try to extract VID/PID
-    if let Some(start) = line.find("VID_") {
-        if let Some(end) = line[start..].find(|c: char| c.is_whitespace() || c == '\\' || c == '&') {
-            return Some(line[start..start + end].to_string());
-        }
-    }
+/// Extract timestamp from event XML
+fn extract_timestamp_from_xml(xml: &str) -> Option<DateTime<Utc>> {
+    // Look for SystemTime attribute
+    if let Some(start) = xml.find("SystemTime='") {
+        let after = &xml[start + 12..];
+        if let Some(end) = after.find('\'') {
+            let time_str = &after[..end];
 
-    // Try to extract device instance ID
-    if line.contains("USBSTOR") {
-        return Some("USBSTOR_Device".to_string());
+            // Parse ISO 8601 format: 2026-01-31T23:41:31.538Z
+            if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
+                return Some(dt.with_timezone(&Utc));
+            }
+
+            // Try without Z
+            let time_with_z = format!("{}Z", time_str.trim_end_matches('Z'));
+            if let Ok(dt) = DateTime::parse_from_rfc3339(&time_with_z) {
+                return Some(dt.with_timezone(&Utc));
+            }
+
+            // Try parsing as naive datetime then convert to UTC
+            if let Ok(naive) = NaiveDateTime::parse_from_str(
+                &time_str.replace('T', " ").split('.').next().unwrap_or(""),
+                "%Y-%m-%d %H:%M:%S"
+            ) {
+                return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
+            }
+        }
     }
 
     None

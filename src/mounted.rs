@@ -3,7 +3,13 @@ use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::RegKey;
 
 /// Query MountedDevices from registry
-pub fn get_mounted_devices() -> HashMap<String, String> {
+pub async fn get_mounted_devices() -> HashMap<String, String> {
+    tokio::task::spawn_blocking(|| get_mounted_devices_sync())
+        .await
+        .unwrap_or_default()
+}
+
+fn get_mounted_devices_sync() -> HashMap<String, String> {
     let mut mounted = HashMap::new();
 
     println!("Querying MountedDevices...");

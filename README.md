@@ -5,19 +5,23 @@ A comprehensive Rust application that scans and displays detailed history of all
 ## Features
 
 ### Core Functionality
+- **Concurrent Scanning**: Async/await architecture with parallel I/O operations for maximum performance
+- **Native Windows APIs**: Direct Windows Event Log API calls (no PowerShell or wevtutil spawning)
 - **Registry Scanning**: Queries both `USBSTOR` and `USB` registry paths for comprehensive device discovery
 - **Installation Timestamps**: Parses `setupapi.dev.log` and Windows Event Logs to find when devices were first installed
 - **Device Categorization**: Automatically categorizes devices into Storage, Input, Audio, Mobile, Hub, and Other
 - **Color-Coded Output**: Terminal-based color-coded display with category icons
 - **Smart Deduplication**: Removes duplicate entries (same device in multiple registry locations)
-- **Vendor Database**: Built-in database of 100+ USB manufacturers (VID lookup)
+- **Vendor Database**: Built-in database of 580+ USB manufacturers (VID lookup)
 
-### Data Sources
-1. **Windows Registry** - `HKLM\SYSTEM\CurrentControlSet\Enum\{USBSTOR,USB}`
+### Data Sources (All queried concurrently)
+1. **Windows Registry** - `HKLM\SYSTEM\CurrentControlSet\Enum\{USBSTOR,USB}` (async parallel scanning)
 2. **setupapi.dev.log** - `C:\Windows\INF\setupapi.dev.log` for persistent installation timestamps
-3. **Windows Event Logs** - System and DriverFrameworks logs for additional timestamps
+3. **Windows Event Logs** - Native Event Log API (`EvtOpenLog`, `EvtQuery`, `EvtNext`) for System and DriverFrameworks logs
 4. **MountedDevices** - Drive letter mappings
 5. **WMI Queries** - Currently connected removable drives
+
+All data sources are queried in parallel using Tokio async runtime for optimal performance.
 
 ### Device Information Displayed
 - VID:PID (Vendor ID : Product ID)
@@ -27,6 +31,16 @@ A comprehensive Rust application that scans and displays detailed history of all
 - Installation timestamp (when available)
 - Drive letter (for storage devices)
 - Device category with color-coded icons
+
+## Performance
+
+The application is optimized for speed using async/concurrent operations:
+- **Parallel Registry Scanning** - Multiple registry paths scanned concurrently
+- **Concurrent Data Gathering** - All data sources (registry, setupapi, event logs, WMI, mounted devices) queried in parallel
+- **Thread Pool for I/O** - Blocking operations offloaded to Tokio thread pool
+- **Native APIs** - Direct Windows Event Log API calls eliminate process spawning overhead
+
+All I/O-bound operations run concurrently, making the tool significantly faster than sequential implementations.
 
 ## Requirements
 
@@ -125,19 +139,24 @@ Total all devices (including system): 82
 
 ## Architecture
 
-The project follows Separation of Concerns (SoC) with modular architecture:
+The project follows Separation of Concerns (SoC) with async modular architecture:
 
-- `main.rs` - Orchestration and display logic
+- `main.rs` - Async orchestration and display logic (Tokio runtime)
 - `device.rs` - Device structure and categorization
-- `vendors.rs` - USB vendor database (VID to manufacturer mapping)
-- `registry.rs` - Windows registry queries
-- `setupapi.rs` - setupapi.dev.log parser
-- `eventlog.rs` - Windows Event Log queries
-- `mounted.rs` - MountedDevices registry queries
-- `wmi_query.rs` - WMI queries for connected drives
+- `vendors.rs` - USB vendor database (580+ manufacturers, VID to name mapping)
+- `registry.rs` - Async Windows registry queries with parallel path scanning
+- `setupapi.rs` - Async setupapi.dev.log parser
+- `eventlog.rs` - Native Windows Event Log API queries (EvtOpenLog, EvtQuery, EvtNext, EvtRender)
+- `mounted.rs` - Async MountedDevices registry queries
+- `wmi_query.rs` - Async WMI queries for connected drives
+
+All modules use `tokio::spawn_blocking` for I/O operations and are orchestrated concurrently in `main.rs` using `tokio::join!`.
 
 ## Dependencies
 
+- `tokio` - Async runtime with multi-threading support
+- `futures` - Async utilities for concurrent operations
+- `windows` - Native Windows API bindings (Event Log API)
 - `winreg` - Windows registry access
 - `wmi` - WMI queries
 - `serde` - Serialization/deserialization

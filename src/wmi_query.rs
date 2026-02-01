@@ -11,7 +11,13 @@ pub struct Win32_LogicalDisk {
 }
 
 /// Query WMI for currently connected removable drives
-pub fn get_removable_drives() -> Vec<(String, Option<String>, Option<String>)> {
+pub async fn get_removable_drives() -> Vec<(String, Option<String>, Option<String>)> {
+    tokio::task::spawn_blocking(|| get_removable_drives_sync())
+        .await
+        .unwrap_or_default()
+}
+
+fn get_removable_drives_sync() -> Vec<(String, Option<String>, Option<String>)> {
     let mut drives = Vec::new();
 
     println!("Querying WMI for removable drives...");

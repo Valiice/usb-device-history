@@ -12,16 +12,20 @@ use std::io::{self, Write};
 use colored::*;
 use device::{UsbDevice, DeviceCategory};
 
-fn collect_all_devices() -> Vec<UsbDevice> {
+async fn collect_all_devices() -> Vec<UsbDevice> {
     println!("{}", "=== Scanning Registry ===".bright_cyan().bold());
-    let mut devices = registry::collect_devices();
+    let mut devices = registry::collect_devices().await;
     println!();
 
     println!("{}", "=== Gathering Additional Information ===".bright_cyan().bold());
-    let setupapi_times = setupapi::parse_setupapi_log();
-    let event_times = eventlog::get_install_timestamps();
-    let _mounted = mounted::get_mounted_devices();
-    let removable = wmi_query::get_removable_drives();
+
+    // Run setupapi, event logs, mounted devices, and WMI queries concurrently
+    let (setupapi_times, event_times, _mounted, removable) = tokio::join!(
+        setupapi::parse_setupapi_log(),
+        eventlog::get_install_timestamps(),
+        mounted::get_mounted_devices(),
+        wmi_query::get_removable_drives()
+    );
 
     // Show combined timestamp results
     let total_timestamps = setupapi_times.len() + event_times.len();
@@ -261,7 +265,8 @@ fn pause() {
     io::stdin().read_line(&mut input).unwrap();
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     // Parse command-line arguments
     let args: Vec<String> = std::env::args().collect();
     let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
@@ -269,7 +274,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("{}", "=== USB Device History Scanner ===".bright_magenta().bold());
     println!();
 
-    let devices = collect_all_devices();
+    let devices = collect_all_devices().await;
     display_devices(&devices, verbose);
 
     pause();
